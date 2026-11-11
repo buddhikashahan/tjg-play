@@ -45,7 +45,7 @@ interface TVPlayerModalProps {
 const SEEK_STEP_SEC = 10;
 const CONTROLS_HIDE_MS = 3500;
 const TOAST_MS = 3000;
-const PROGRESS_SAVE_MS = 5000;
+const PROGRESS_SAVE_MS = 15000;
 /** Keeps the 16:9 player short enough that the title and action row fit on one screen. */
 const PLAYER_MAX_WIDTH = "calc((100vh - 20rem) * 16 / 9)";
 const QUICK_NOTES = ["⭐ Key takeaway", "📌 Review later", "💡 Important concept", "❓ Question to research", "🎯 Core summary"];

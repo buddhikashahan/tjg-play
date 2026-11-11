@@ -39,7 +39,7 @@ const DEFAULT_FILTERS: Filters = {
   search: "",
 };
 
-const SYNC_INTERVAL_MS = 4000;
+const SYNC_INTERVAL_MS = 10000;
 const SEARCH_DEBOUNCE_MS = 400;
 /** Videos watched at least this far are considered finished and leave the home feed. */
 const FINISHED_PCT = 95;

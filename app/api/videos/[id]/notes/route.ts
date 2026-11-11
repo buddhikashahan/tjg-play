@@ -1,57 +1,33 @@
 import { NextRequest, NextResponse } from "next/server";
-import prisma from "@/lib/prisma";
+import { addNote, getVideo, listNotes } from "@/lib/db";
+import { errorResponse } from "@/lib/apiResponse";
 
-export async function GET(
-  request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
+type Params = { params: Promise<{ id: string }> };
+
+export async function GET(_request: NextRequest, { params }: Params) {
   try {
     const { id } = await params;
-    const notes = await prisma.note.findMany({
-      where: { videoId: id },
-      orderBy: { createdAt: "desc" },
-    });
-    return NextResponse.json({ success: true, notes });
-  } catch (error: any) {
-    console.error("GET notes error:", error);
-    return NextResponse.json(
-      { success: false, error: error.message },
-      { status: 500 }
-    );
+    return NextResponse.json({ success: true, notes: await listNotes(id) });
+  } catch (error) {
+    return errorResponse(error, "Failed to fetch notes");
   }
 }
 
-export async function POST(
-  request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
+export async function POST(request: NextRequest, { params }: Params) {
   try {
     const { id } = await params;
-    const body = await request.json();
-    const { content, videoTimestamp } = body;
+    const { content, videoTimestamp } = await request.json();
 
-    if (!content || !content.trim()) {
-      return NextResponse.json(
-        { success: false, error: "Content is required" },
-        { status: 400 }
-      );
+    if (typeof content !== "string" || !content.trim()) {
+      return NextResponse.json({ success: false, error: "Content is required" }, { status: 400 });
+    }
+    if (!(await getVideo(id))) {
+      return NextResponse.json({ success: false, error: "Video not found" }, { status: 404 });
     }
 
-    const note = await prisma.note.create({
-      data: {
-        videoId: id,
-        content: content.trim(),
-        videoTimestamp: typeof videoTimestamp === "number" ? videoTimestamp : null,
-      },
-    });
-
+    const note = await addNote(id, content.trim(), typeof videoTimestamp === "number" ? videoTimestamp : null);
     return NextResponse.json({ success: true, note });
-  } catch (error: any) {
-    console.error("POST note error:", error);
-    return NextResponse.json(
-      { success: false, error: error.message },
-      { status: 500 }
-    );
+  } catch (error) {
+    return errorResponse(error, "Failed to save note");
   }
 }
-

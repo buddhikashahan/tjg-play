@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { fetchYouTubeMetadata } from "@/lib/youtube";
 import { suggestClassificationWithGemini } from "@/lib/gemini";
-import prisma from "@/lib/prisma";
+import { authors, categories, listVideos } from "@/lib/db";
 
 export async function POST(request: NextRequest) {
   try {
@@ -16,23 +16,14 @@ export async function POST(request: NextRequest) {
     // 1. Fetch raw YouTube metadata
     const metadata = await fetchYouTubeMetadata(url);
 
-    // 2. Fetch existing authors from DB (registered authors + any distinct authors on videos)
-    const [dbAuthors, distinctVideoAuthors] = await Promise.all([
-      prisma.author.findMany({
-        select: { name: true, imageUrl: true, bio: true },
-        orderBy: { name: "asc" },
-      }),
-      prisma.video.findMany({
-        select: { author: true, authorImageUrl: true },
-        distinct: ["author"],
-      }),
-    ]);
+    // 2. Existing authors (registered authors + any authors only found on videos)
+    const [dbAuthors, dbCategories, videos] = await Promise.all([authors.list(), categories.list(), listVideos()]);
 
     const authorsMap = new Map<string, { name: string; imageUrl?: string | null; bio?: string | null }>();
     dbAuthors.forEach((a) => {
-      authorsMap.set(a.name.toLowerCase(), a);
+      authorsMap.set(a.name.toLowerCase(), { name: a.name, imageUrl: a.imageUrl, bio: a.bio });
     });
-    distinctVideoAuthors.forEach((v) => {
+    videos.forEach((v) => {
       if (!v.author) return;
       const key = v.author.toLowerCase();
       if (!authorsMap.has(key)) {
@@ -45,23 +36,12 @@ export async function POST(request: NextRequest) {
 
     const existingAuthors = Array.from(authorsMap.values());
 
-    // 3. Fetch existing categories from DB (registered categories + any distinct subjects on videos)
-    const [dbCategories, distinctVideoSubjects] = await Promise.all([
-      prisma.category.findMany({
-        select: { name: true, description: true },
-        orderBy: { name: "asc" },
-      }),
-      prisma.video.findMany({
-        select: { subject: true },
-        distinct: ["subject"],
-      }),
-    ]);
-
+    // 3. Existing categories (registered categories + any subjects only found on videos)
     const categoriesMap = new Map<string, { name: string; description?: string | null }>();
     dbCategories.forEach((c) => {
-      categoriesMap.set(c.name.toLowerCase(), c);
+      categoriesMap.set(c.name.toLowerCase(), { name: c.name, description: c.description });
     });
-    distinctVideoSubjects.forEach((v) => {
+    videos.forEach((v) => {
       if (!v.subject) return;
       const key = v.subject.toLowerCase();
       if (!categoriesMap.has(key)) {

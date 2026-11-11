@@ -1,128 +1,55 @@
 import { NextRequest, NextResponse } from "next/server";
-import prisma from "@/lib/prisma";
+import { authors, countVideosBy, deleteVideosWhere, listVideos, updateVideosWhere } from "@/lib/db";
+import { errorResponse } from "@/lib/apiResponse";
 
-// GET /api/authors - List all authors with video count + optional auto-sync from videos
-export async function GET(req: NextRequest) {
-  try {
-    const { searchParams } = new URL(req.url);
-    const shouldSync = searchParams.get("sync") === "true";
+export const dynamic = "force-dynamic";
 
-    // Check count of authors
-    const existingCount = await prisma.author.count();
-
-    // Auto-sync if requested or if Author table is currently empty
-    if (shouldSync || existingCount === 0) {
-      const distinctVideoAuthors = await prisma.video.findMany({
-        select: {
-          author: true,
-          authorImageUrl: true,
-        },
-        distinct: ["author"],
-      });
-
-      for (const item of distinctVideoAuthors) {
-        if (!item.author || !item.author.trim()) continue;
-        const trimmed = item.author.trim();
-        
-        const found = await prisma.author.findUnique({
-          where: { name: trimmed },
-        });
-
-        if (!found) {
-          await prisma.author.create({
-            data: {
-              name: trimmed,
-              imageUrl: item.authorImageUrl || null,
-            },
-          });
-        } else if (!found.imageUrl && item.authorImageUrl) {
-          await prisma.author.update({
-            where: { id: found.id },
-            data: { imageUrl: item.authorImageUrl },
-          });
-        }
-      }
-    }
-
-    // Get all authors ordered alphabetically
-    const authors = await prisma.author.findMany({
-      orderBy: { name: "asc" },
-    });
-
-    // Get video counts per author
-    const videoCounts = await prisma.video.groupBy({
-      by: ["author"],
-      _count: {
-        id: true,
-      },
-    });
-
-    const countMap = new Map<string, number>();
-    for (const vc of videoCounts) {
-      countMap.set(vc.author.toLowerCase(), vc._count.id);
-    }
-
-    const result = authors.map((author) => ({
-      ...author,
-      videoCount: countMap.get(author.name.toLowerCase()) || 0,
-    }));
-
-    return NextResponse.json({
-      success: true,
-      authors: result,
-      total: result.length,
-    });
-  } catch (error) {
-    console.error("GET /api/authors error:", error);
-    return NextResponse.json(
-      { success: false, error: "Failed to fetch authors" },
-      { status: 500 }
-    );
+/** Registers any author that only exists on videos (and fills in missing photos). */
+async function syncAuthorsFromVideos() {
+  const seen = new Set<string>();
+  for (const video of await listVideos()) {
+    const name = video.author?.trim();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    const existing = await authors.getByName(name);
+    if (!existing) await authors.create({ name, imageUrl: video.authorImageUrl || null, bio: null });
+    else if (!existing.imageUrl && video.authorImageUrl) await authors.update(existing.id, { imageUrl: video.authorImageUrl });
   }
 }
 
-// POST /api/authors - Create new author
+// GET /api/authors[?sync=true] - list authors with video counts
+export async function GET(req: NextRequest) {
+  try {
+    const shouldSync = req.nextUrl.searchParams.get("sync") === "true";
+    if (shouldSync || (await authors.list()).length === 0) await syncAuthorsFromVideos();
+
+    const counts = await countVideosBy("author");
+    const result = (await authors.list()).map((a) => ({ ...a, videoCount: counts.get(a.name.toLowerCase()) || 0 }));
+    return NextResponse.json({ success: true, authors: result, total: result.length });
+  } catch (error) {
+    return errorResponse(error, "Failed to fetch authors");
+  }
+}
+
+// POST /api/authors - create author
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json();
-    const { name, imageUrl, bio } = body;
-
-    if (!name || !name.trim()) {
-      return NextResponse.json(
-        { success: false, error: "Author name is required" },
-        { status: 400 }
-      );
+    const { name, imageUrl, bio } = await req.json();
+    const trimmedName = typeof name === "string" ? name.trim() : "";
+    if (!trimmedName) {
+      return NextResponse.json({ success: false, error: "Author name is required" }, { status: 400 });
+    }
+    if (await authors.getByName(trimmedName)) {
+      return NextResponse.json({ success: false, error: `Author "${trimmedName}" already exists` }, { status: 409 });
     }
 
-    const trimmedName = name.trim();
-
-    // Check if author name already exists
-    const existing = await prisma.author.findUnique({
-      where: { name: trimmedName },
+    const author = await authors.create({
+      name: trimmedName,
+      imageUrl: imageUrl?.trim() || null,
+      bio: bio?.trim() || null,
     });
-
-    if (existing) {
-      return NextResponse.json(
-        { success: false, error: `Author "${trimmedName}" already exists` },
-        { status: 409 }
-      );
-    }
-
-    const author = await prisma.author.create({
-      data: {
-        name: trimmedName,
-        imageUrl: imageUrl?.trim() || null,
-        bio: bio?.trim() || null,
-      },
-    });
-
-    // If there are existing videos matching this author name, sync the image
-    if (author.imageUrl) {
-      await prisma.video.updateMany({
-        where: { author: trimmedName },
-        data: { authorImageUrl: author.imageUrl },
-      });
-    }
+    // Existing videos by this author pick up the photo.
+    if (author.imageUrl) await updateVideosWhere("author", trimmedName, { authorImageUrl: author.imageUrl });
 
     return NextResponse.json({
       success: true,
@@ -130,99 +57,52 @@ export async function POST(req: NextRequest) {
       message: `Author "${trimmedName}" created successfully`,
     });
   } catch (error) {
-    console.error("POST /api/authors error:", error);
-    return NextResponse.json(
-      { success: false, error: "Failed to create author" },
-      { status: 500 }
-    );
+    return errorResponse(error, "Failed to create author");
   }
 }
 
-// PATCH /api/authors - Update author
+// PATCH /api/authors - update author (optionally cascading to videos)
 export async function PATCH(req: NextRequest) {
   try {
-    const body = await req.json();
-    const { id, name, imageUrl, bio, updateVideos = true } = body;
+    const { id, name, imageUrl, bio, updateVideos = true } = await req.json();
+    if (!id) return NextResponse.json({ success: false, error: "Author ID is required" }, { status: 400 });
 
-    if (!id) {
-      return NextResponse.json(
-        { success: false, error: "Author ID is required" },
-        { status: 400 }
-      );
-    }
-
-    const existing = await prisma.author.findUnique({
-      where: { id },
-    });
-
-    if (!existing) {
-      return NextResponse.json(
-        { success: false, error: "Author not found" },
-        { status: 404 }
-      );
-    }
+    const existing = await authors.getById(id);
+    if (!existing) return NextResponse.json({ success: false, error: "Author not found" }, { status: 404 });
 
     const newName = name ? name.trim() : existing.name;
-    const newImageUrl = imageUrl !== undefined ? (imageUrl ? imageUrl.trim() : null) : existing.imageUrl;
-    const newBio = bio !== undefined ? (bio ? bio.trim() : null) : existing.bio;
+    const newImageUrl = imageUrl !== undefined ? imageUrl?.trim() || null : existing.imageUrl ?? null;
+    const newBio = bio !== undefined ? bio?.trim() || null : existing.bio ?? null;
 
-    // If name changed, check uniqueness
     if (newName !== existing.name) {
-      const conflict = await prisma.author.findUnique({
-        where: { name: newName },
-      });
+      const conflict = await authors.getByName(newName);
       if (conflict && conflict.id !== id) {
-        return NextResponse.json(
-          { success: false, error: `Another author named "${newName}" already exists` },
-          { status: 409 }
-        );
+        return NextResponse.json({ success: false, error: `Another author named "${newName}" already exists` }, { status: 409 });
       }
     }
 
-    const updated = await prisma.author.update({
-      where: { id },
-      data: {
-        name: newName,
-        imageUrl: newImageUrl,
-        bio: newBio,
-      },
-    });
+    const updated = await authors.update(id, { name: newName, imageUrl: newImageUrl, bio: newBio });
 
-    // Cascade to videos if requested
     if (updateVideos) {
-      const updateData: { author?: string; authorImageUrl?: string | null } = {};
-      if (newName !== existing.name) updateData.author = newName;
-      if (newImageUrl !== existing.imageUrl) updateData.authorImageUrl = newImageUrl;
-
-      if (Object.keys(updateData).length > 0) {
-        await prisma.video.updateMany({
-          where: { author: existing.name },
-          data: updateData,
-        });
-      }
+      const videoPatch: { author?: string; authorImageUrl?: string | null } = {};
+      if (newName !== existing.name) videoPatch.author = newName;
+      if (newImageUrl !== (existing.imageUrl ?? null)) videoPatch.authorImageUrl = newImageUrl;
+      if (Object.keys(videoPatch).length) await updateVideosWhere("author", existing.name, videoPatch);
     }
 
-    return NextResponse.json({
-      success: true,
-      author: updated,
-      message: `Author "${updated.name}" updated successfully`,
-    });
+    return NextResponse.json({ success: true, author: updated, message: `Author "${newName}" updated successfully` });
   } catch (error) {
-    console.error("PATCH /api/authors error:", error);
-    return NextResponse.json(
-      { success: false, error: "Failed to update author" },
-      { status: 500 }
-    );
+    return errorResponse(error, "Failed to update author");
   }
 }
 
-// DELETE /api/authors - Delete author
+// DELETE /api/authors?id=...&deleteVideos=true|&reassignTo=Name
 export async function DELETE(req: NextRequest) {
   try {
-    const { searchParams } = new URL(req.url);
-    let id = searchParams.get("id");
-    let deleteVideos = searchParams.get("deleteVideos") === "true";
-    let reassignTo = searchParams.get("reassignTo");
+    const params = req.nextUrl.searchParams;
+    let id = params.get("id");
+    let deleteVideos = params.get("deleteVideos") === "true";
+    let reassignTo = params.get("reassignTo");
 
     if (!id) {
       const body = await req.json().catch(() => ({}));
@@ -230,51 +110,17 @@ export async function DELETE(req: NextRequest) {
       if (body.deleteVideos !== undefined) deleteVideos = !!body.deleteVideos;
       if (body.reassignTo) reassignTo = body.reassignTo;
     }
+    if (!id) return NextResponse.json({ success: false, error: "Author ID is required" }, { status: 400 });
 
-    if (!id) {
-      return NextResponse.json(
-        { success: false, error: "Author ID is required" },
-        { status: 400 }
-      );
-    }
+    const existing = await authors.getById(id);
+    if (!existing) return NextResponse.json({ success: false, error: "Author not found" }, { status: 404 });
 
-    const existing = await prisma.author.findUnique({
-      where: { id },
-    });
+    if (deleteVideos) await deleteVideosWhere("author", existing.name);
+    else if (reassignTo?.trim()) await updateVideosWhere("author", existing.name, { author: reassignTo.trim() });
 
-    if (!existing) {
-      return NextResponse.json(
-        { success: false, error: "Author not found" },
-        { status: 404 }
-      );
-    }
-
-    // Handle existing videos by this author
-    if (deleteVideos) {
-      await prisma.video.deleteMany({
-        where: { author: existing.name },
-      });
-    } else if (reassignTo && reassignTo.trim()) {
-      await prisma.video.updateMany({
-        where: { author: existing.name },
-        data: { author: reassignTo.trim() },
-      });
-    }
-
-    await prisma.author.delete({
-      where: { id },
-    });
-
-    return NextResponse.json({
-      success: true,
-      message: `Author "${existing.name}" removed successfully`,
-    });
+    await authors.remove(id);
+    return NextResponse.json({ success: true, message: `Author "${existing.name}" removed successfully` });
   } catch (error) {
-    console.error("DELETE /api/authors error:", error);
-    return NextResponse.json(
-      { success: false, error: "Failed to delete author" },
-      { status: 500 }
-    );
+    return errorResponse(error, "Failed to delete author");
   }
 }
-

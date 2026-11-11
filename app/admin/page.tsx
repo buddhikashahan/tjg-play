@@ -23,7 +23,7 @@ import {
   FolderTree,
 } from "lucide-react";
 import { VideoItem, VideoRating, AuthorItem, CategoryItem } from "@/lib/types";
-import { uploadAuthorAvatar, isFirebaseConfigured } from "@/lib/firebase";
+import { uploadAuthorAvatar } from "@/lib/uploadClient";
 import { formatTimestamp } from "@/lib/youtube";
 import { SearchableSelect, SearchableOption } from "@/components/SearchableSelect";
 
@@ -31,7 +31,7 @@ export default function AdminDashboardPage() {
   const [videos, setVideos] = useState<VideoItem[]>([]);
   const [dbAuthors, setDbAuthors] = useState<AuthorItem[]>([]);
   const [dbCategories, setDbCategories] = useState<CategoryItem[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [dbConnected, setDbConnected] = useState<boolean | null>(null);
 
   // New Video Form State
   const [urlInput, setUrlInput] = useState("");
@@ -71,7 +71,6 @@ export default function AdminDashboardPage() {
   // Fetch all videos, authors, and categories
   const fetchVideos = useCallback(async () => {
     try {
-      setLoading(true);
       const [vRes, aRes, cRes] = await Promise.all([
         fetch("/api/videos"),
         fetch("/api/authors"),
@@ -84,8 +83,11 @@ export default function AdminDashboardPage() {
         cRes.json().catch(() => ({ success: false })),
       ]);
 
+      setDbConnected(Boolean(vData.success));
       if (vData.success) {
         setVideos(vData.videos);
+      } else {
+        setMetaError(vData.error || "Could not load the library from Firebase.");
       }
       if (aData.success && aData.authors) {
         setDbAuthors(aData.authors);
@@ -95,8 +97,7 @@ export default function AdminDashboardPage() {
       }
     } catch (err) {
       console.error("Failed to load data:", err);
-    } finally {
-      setLoading(false);
+      setDbConnected(false);
     }
   }, []);
 
@@ -458,9 +459,16 @@ export default function AdminDashboardPage() {
           <div>
             <h1 className="text-2xl font-black text-white flex items-center gap-2">
               Admin &amp; Library Manager
-              {isFirebaseConfigured && (
-                <span className="text-emerald-400 text-xs font-semibold px-2.5 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 flex items-center gap-1">
-                  <Flame className="w-3.5 h-3.5 text-orange-400" /> Firebase Storage
+              {dbConnected !== null && (
+                <span
+                  className={`text-xs font-semibold px-2.5 py-0.5 rounded-full border flex items-center gap-1 ${
+                    dbConnected
+                      ? "text-emerald-400 bg-emerald-500/10 border-emerald-500/30"
+                      : "text-rose-300 bg-rose-500/10 border-rose-500/40"
+                  }`}
+                >
+                  <Flame className="w-3.5 h-3.5 text-orange-400" />
+                  {dbConnected ? "Firebase connected" : "Firebase not connected"}
                 </span>
               )}
             </h1>

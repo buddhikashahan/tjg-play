@@ -37,3 +37,7 @@ next-env.d.ts
 /prisma/*.db
 /prisma/*.db-journal
 
+
+# Firebase service-account key (never commit)
+firebase-service-account.json
+*-firebase-adminsdk-*.json

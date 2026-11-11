@@ -55,26 +55,47 @@ Common commands are matched instantly on the server. Anything else goes to Gemin
 
 ## Setup
 
-Requirements: Node.js 20+, and Chrome or Edge.
+Requirements: Node.js 22+, Chrome or Edge, and a Firebase project with **Firestore** and **Storage** enabled.
+
+The library (videos, notes, authors, categories) is stored in **Cloud Firestore**, and author photos in **Firebase Storage**. Only the server talks to Firebase, using a service-account key, so no Firebase security rules need to be opened up.
 
 ```bash
 npm install
-cp .env.example .env         # then fill in GEMINI_API_KEY (optional)
-npx prisma db push           # create / update the SQLite database
-npm run db:seed              # optional: sample videos (only runs on an empty library)
+cp .env.example .env         # fill in the Firebase project ID, bucket and (optionally) GEMINI_API_KEY
 npm run dev                  # http://localhost:3000/tv
 ```
 
-`npm run db:seed -- --force` replaces **all** videos and notes with the samples.
+**Service-account key:** Firebase console → Project settings → Service accounts → *Generate new private key*. Save the downloaded file as `firebase-service-account.json` in the project folder (it's git-ignored). Alternatively, copy its `client_email` and `private_key` into `.env`.
 
 ### Environment
 
 | Variable | Purpose |
 | --- | --- |
-| `DATABASE_URL` | SQLite file, default `file:./dev.db` |
+| `FIREBASE_PROJECT_ID` | Firebase project ID |
+| `FIREBASE_STORAGE_BUCKET` | Storage bucket, e.g. `your-project.firebasestorage.app` |
+| `FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY` | Service-account credentials, if not using `firebase-service-account.json` |
 | `GEMINI_API_KEY` | Optional. Enables AI classification and free-form voice commands; rule-based fallback otherwise |
 | `GEMINI_MODEL` | Optional model override |
-| `NEXT_PUBLIC_FIREBASE_*`, `FIREBASE_*` | Optional. Store author images in Firebase Storage instead of `public/uploads` |
+
+### Firestore layout
+
+| Collection | Contents |
+| --- | --- |
+| `videos` | One document per video (rating, saved flag, watch progress, tags...) |
+| `notes` | Timestamped notes, each with a `videoId` |
+| `authors`, `categories` | Speakers and topics (unique by name) |
+| `meta/sync` | Version counter that tells the TV to refresh after edits |
+
+The server caches reads for up to a minute and clears the cache on every write, so day-to-day use stays well inside Firebase's free tier. Edits made directly in the Firebase console show up within a minute (or press **Refresh** on the TV).
+
+### Moving an old SQLite library to Firebase
+
+Older versions stored the library in `prisma/dev.db`. To copy it, along with photos in `public/uploads`, into Firebase:
+
+```bash
+npm run migrate:sqlite -- --dry-run   # check credentials and access, writes nothing
+npm run migrate:sqlite                # copy (refuses if Firestore already has videos)
+```
 
 ---
 
@@ -103,8 +124,11 @@ components/TVPlayerModal.tsx    Player with TV controls, rating, saving and note
 components/VoiceAssistant.tsx   Speech recognition, hands-free mode, spoken feedback
 components/tv/                  Nav rail, video cards, explore view, shared UI
 hooks/useTVRemoteNavigation.ts  D-pad spatial navigation, Back stack, pointer/D-pad switching
+lib/db.ts                       Firestore data layer (with in-process cache)
+lib/firebaseAdmin.ts            Firebase Admin setup (credentials, Firestore, Storage)
+lib/storage.ts                  Photo uploads to Firebase Storage
 lib/gemini.ts                   Voice command parser + video classification
-prisma/schema.prisma            Database schema
+scripts/                        One-time SQLite → Firebase migration
 ```
 
-Scripts: `dev`, `build`, `start`, `db:push`, `db:seed`, `prisma:studio`.
+Scripts: `dev`, `build`, `start`, `migrate:sqlite`.

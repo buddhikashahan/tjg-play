@@ -1,132 +1,52 @@
 import { NextRequest, NextResponse } from "next/server";
-import prisma from "@/lib/prisma";
+import { categories, countVideosBy, deleteVideosWhere, listVideos, updateVideosWhere } from "@/lib/db";
+import { errorResponse } from "@/lib/apiResponse";
 
-// Predefined palette colors for categories if not specified
-const DEFAULT_COLORS = [
-  "#ef4444", // red
-  "#f97316", // orange
-  "#f59e0b", // amber
-  "#10b981", // emerald
-  "#06b6d4", // cyan
-  "#3b82f6", // blue
-  "#6366f1", // indigo
-  "#8b5cf6", // violet
-  "#ec4899", // pink
-];
+export const dynamic = "force-dynamic";
 
-// GET /api/categories - List all categories with video count + optional auto-sync from videos
-export async function GET(req: NextRequest) {
-  try {
-    const { searchParams } = new URL(req.url);
-    const shouldSync = searchParams.get("sync") === "true";
+// Palette for categories created without a colour
+const DEFAULT_COLORS = ["#ef4444", "#f97316", "#f59e0b", "#10b981", "#06b6d4", "#3b82f6", "#6366f1", "#8b5cf6", "#ec4899"];
 
-    // Check count of categories
-    const existingCount = await prisma.category.count();
-
-    // Auto-sync if requested or if Category table is currently empty
-    if (shouldSync || existingCount === 0) {
-      const distinctVideoSubjects = await prisma.video.findMany({
-        select: {
-          subject: true,
-        },
-        distinct: ["subject"],
-      });
-
-      let colorIndex = 0;
-      for (const item of distinctVideoSubjects) {
-        if (!item.subject || !item.subject.trim()) continue;
-        const trimmed = item.subject.trim();
-
-        const found = await prisma.category.findUnique({
-          where: { name: trimmed },
-        });
-
-        if (!found) {
-          const color = DEFAULT_COLORS[colorIndex % DEFAULT_COLORS.length];
-          colorIndex++;
-          await prisma.category.create({
-            data: {
-              name: trimmed,
-              color,
-            },
-          });
-        }
-      }
-    }
-
-    // Get all categories ordered alphabetically
-    const categories = await prisma.category.findMany({
-      orderBy: { name: "asc" },
-    });
-
-    // Get video counts per category (subject)
-    const videoCounts = await prisma.video.groupBy({
-      by: ["subject"],
-      _count: {
-        id: true,
-      },
-    });
-
-    const countMap = new Map<string, number>();
-    for (const vc of videoCounts) {
-      countMap.set(vc.subject.toLowerCase(), vc._count.id);
-    }
-
-    const result = categories.map((cat) => ({
-      ...cat,
-      videoCount: countMap.get(cat.name.toLowerCase()) || 0,
-    }));
-
-    return NextResponse.json({
-      success: true,
-      categories: result,
-      total: result.length,
-    });
-  } catch (error) {
-    console.error("GET /api/categories error:", error);
-    return NextResponse.json(
-      { success: false, error: "Failed to fetch categories" },
-      { status: 500 }
-    );
+/** Registers any subject that only exists on videos. */
+async function syncCategoriesFromVideos() {
+  const subjects = new Set((await listVideos()).map((v) => v.subject?.trim()).filter(Boolean));
+  let colorIndex = 0;
+  for (const name of subjects) {
+    if (await categories.getByName(name)) continue;
+    await categories.create({ name, description: null, color: DEFAULT_COLORS[colorIndex++ % DEFAULT_COLORS.length] });
   }
 }
 
-// POST /api/categories - Create new category
+// GET /api/categories[?sync=true] - list categories with video counts
+export async function GET(req: NextRequest) {
+  try {
+    const shouldSync = req.nextUrl.searchParams.get("sync") === "true";
+    if (shouldSync || (await categories.list()).length === 0) await syncCategoriesFromVideos();
+
+    const counts = await countVideosBy("subject");
+    const result = (await categories.list()).map((c) => ({ ...c, videoCount: counts.get(c.name.toLowerCase()) || 0 }));
+    return NextResponse.json({ success: true, categories: result, total: result.length });
+  } catch (error) {
+    return errorResponse(error, "Failed to fetch categories");
+  }
+}
+
+// POST /api/categories - create category
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json();
-    const { name, description, color } = body;
-
-    if (!name || !name.trim()) {
-      return NextResponse.json(
-        { success: false, error: "Category name is required" },
-        { status: 400 }
-      );
+    const { name, description, color } = await req.json();
+    const trimmedName = typeof name === "string" ? name.trim() : "";
+    if (!trimmedName) {
+      return NextResponse.json({ success: false, error: "Category name is required" }, { status: 400 });
+    }
+    if (await categories.getByName(trimmedName)) {
+      return NextResponse.json({ success: false, error: `Category "${trimmedName}" already exists` }, { status: 409 });
     }
 
-    const trimmedName = name.trim();
-
-    // Check if category name already exists
-    const existing = await prisma.category.findUnique({
-      where: { name: trimmedName },
-    });
-
-    if (existing) {
-      return NextResponse.json(
-        { success: false, error: `Category "${trimmedName}" already exists` },
-        { status: 409 }
-      );
-    }
-
-    const assignedColor =
-      color?.trim() || DEFAULT_COLORS[Math.floor(Math.random() * DEFAULT_COLORS.length)];
-
-    const category = await prisma.category.create({
-      data: {
-        name: trimmedName,
-        description: description?.trim() || null,
-        color: assignedColor,
-      },
+    const category = await categories.create({
+      name: trimmedName,
+      description: description?.trim() || null,
+      color: color?.trim() || DEFAULT_COLORS[Math.floor(Math.random() * DEFAULT_COLORS.length)],
     });
 
     return NextResponse.json({
@@ -135,93 +55,50 @@ export async function POST(req: NextRequest) {
       message: `Category "${trimmedName}" created successfully`,
     });
   } catch (error) {
-    console.error("POST /api/categories error:", error);
-    return NextResponse.json(
-      { success: false, error: "Failed to create category" },
-      { status: 500 }
-    );
+    return errorResponse(error, "Failed to create category");
   }
 }
 
-// PATCH /api/categories - Update category
+// PATCH /api/categories - update category (renames cascade to videos)
 export async function PATCH(req: NextRequest) {
   try {
-    const body = await req.json();
-    const { id, name, description, color, updateVideos = true } = body;
+    const { id, name, description, color, updateVideos = true } = await req.json();
+    if (!id) return NextResponse.json({ success: false, error: "Category ID is required" }, { status: 400 });
 
-    if (!id) {
-      return NextResponse.json(
-        { success: false, error: "Category ID is required" },
-        { status: 400 }
-      );
-    }
-
-    const existing = await prisma.category.findUnique({
-      where: { id },
-    });
-
-    if (!existing) {
-      return NextResponse.json(
-        { success: false, error: "Category not found" },
-        { status: 404 }
-      );
-    }
+    const existing = await categories.getById(id);
+    if (!existing) return NextResponse.json({ success: false, error: "Category not found" }, { status: 404 });
 
     const newName = name ? name.trim() : existing.name;
-    const newDescription = description !== undefined ? (description ? description.trim() : null) : existing.description;
-    const newColor = color !== undefined ? (color ? color.trim() : null) : existing.color;
-
-    // If name changed, check uniqueness
     if (newName !== existing.name) {
-      const conflict = await prisma.category.findUnique({
-        where: { name: newName },
-      });
+      const conflict = await categories.getByName(newName);
       if (conflict && conflict.id !== id) {
-        return NextResponse.json(
-          { success: false, error: `Another category named "${newName}" already exists` },
-          { status: 409 }
-        );
+        return NextResponse.json({ success: false, error: `Another category named "${newName}" already exists` }, { status: 409 });
       }
     }
 
-    const updated = await prisma.category.update({
-      where: { id },
-      data: {
-        name: newName,
-        description: newDescription,
-        color: newColor,
-      },
+    const updated = await categories.update(id, {
+      name: newName,
+      description: description !== undefined ? description?.trim() || null : existing.description ?? null,
+      color: color !== undefined ? color?.trim() || null : existing.color ?? null,
     });
 
-    // Cascade rename to videos if requested
     if (updateVideos && newName !== existing.name) {
-      await prisma.video.updateMany({
-        where: { subject: existing.name },
-        data: { subject: newName },
-      });
+      await updateVideosWhere("subject", existing.name, { subject: newName });
     }
 
-    return NextResponse.json({
-      success: true,
-      category: updated,
-      message: `Category "${updated.name}" updated successfully`,
-    });
+    return NextResponse.json({ success: true, category: updated, message: `Category "${newName}" updated successfully` });
   } catch (error) {
-    console.error("PATCH /api/categories error:", error);
-    return NextResponse.json(
-      { success: false, error: "Failed to update category" },
-      { status: 500 }
-    );
+    return errorResponse(error, "Failed to update category");
   }
 }
 
-// DELETE /api/categories - Delete category
+// DELETE /api/categories?id=...&deleteVideos=true|&reassignTo=Name
 export async function DELETE(req: NextRequest) {
   try {
-    const { searchParams } = new URL(req.url);
-    let id = searchParams.get("id");
-    let deleteVideos = searchParams.get("deleteVideos") === "true";
-    let reassignTo = searchParams.get("reassignTo");
+    const params = req.nextUrl.searchParams;
+    let id = params.get("id");
+    let deleteVideos = params.get("deleteVideos") === "true";
+    let reassignTo = params.get("reassignTo");
 
     if (!id) {
       const body = await req.json().catch(() => ({}));
@@ -229,51 +106,17 @@ export async function DELETE(req: NextRequest) {
       if (body.deleteVideos !== undefined) deleteVideos = !!body.deleteVideos;
       if (body.reassignTo) reassignTo = body.reassignTo;
     }
+    if (!id) return NextResponse.json({ success: false, error: "Category ID is required" }, { status: 400 });
 
-    if (!id) {
-      return NextResponse.json(
-        { success: false, error: "Category ID is required" },
-        { status: 400 }
-      );
-    }
+    const existing = await categories.getById(id);
+    if (!existing) return NextResponse.json({ success: false, error: "Category not found" }, { status: 404 });
 
-    const existing = await prisma.category.findUnique({
-      where: { id },
-    });
+    if (deleteVideos) await deleteVideosWhere("subject", existing.name);
+    else if (reassignTo?.trim()) await updateVideosWhere("subject", existing.name, { subject: reassignTo.trim() });
 
-    if (!existing) {
-      return NextResponse.json(
-        { success: false, error: "Category not found" },
-        { status: 404 }
-      );
-    }
-
-    // Handle existing videos under this category/subject
-    if (deleteVideos) {
-      await prisma.video.deleteMany({
-        where: { subject: existing.name },
-      });
-    } else if (reassignTo && reassignTo.trim()) {
-      await prisma.video.updateMany({
-        where: { subject: existing.name },
-        data: { subject: reassignTo.trim() },
-      });
-    }
-
-    await prisma.category.delete({
-      where: { id },
-    });
-
-    return NextResponse.json({
-      success: true,
-      message: `Category "${existing.name}" removed successfully`,
-    });
+    await categories.remove(id);
+    return NextResponse.json({ success: true, message: `Category "${existing.name}" removed successfully` });
   } catch (error) {
-    console.error("DELETE /api/categories error:", error);
-    return NextResponse.json(
-      { success: false, error: "Failed to delete category" },
-      { status: 500 }
-    );
+    return errorResponse(error, "Failed to delete category");
   }
 }
-
